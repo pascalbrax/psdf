@@ -174,9 +174,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Render
+# Collect the rows to display (filtering as before), recording the widest
+# "used" and "total" strings so the columns can be aligned when rendering.
 # ---------------------------------------------------------------------------
 declare -A seen
+declare -a R_pct R_used R_total R_mount
+uw=0 tw=0          # width of the widest "used" / "total" value
 while read -ra f; do
     n=${#f[@]}
     (( n < 2 )) && continue
@@ -196,19 +199,30 @@ while read -ra f; do
     (( use_allow )) && [[ -z ${allow[$mount]} ]] && continue
     [[ -n ${seen[$mount]} ]] && continue
     seen[$mount]=1
+    (( pct > 0 )) || continue
 
-    if (( pct > 0 )); then
-        printf -v pcttext '(%2d%%)' "$pct"
-        human "$used"; u=$HUMAN
-        human "$size"; t=$HUMAN
-        printf '['
-        progressbar "$pct"
-        printf ' '
-        shade "$pcttext"
-        printf '] '
-        shade "$u/$t"        # used / total, e.g. 231MB/260MB
-        printf ' '
-        shade "$mount"
-        printf '\n'
-    fi
+    human "$used"; u=$HUMAN
+    human "$size"; t=$HUMAN
+    (( ${#u} > uw )) && uw=${#u}
+    (( ${#t} > tw )) && tw=${#t}
+    R_pct+=("$pct"); R_used+=("$u"); R_total+=("$t"); R_mount+=("$mount")
 done <<< "$df_out"
+
+# ---------------------------------------------------------------------------
+# Render: right-justify "used" and left-justify "total" to their column
+# widths, so the '/' separator and the mount points' leading '/' each line
+# up vertically in their own column.
+# ---------------------------------------------------------------------------
+for (( r = 0; r < ${#R_pct[@]}; r++ )); do
+    printf -v pcttext '(%2d%%)' "${R_pct[r]}"
+    printf -v sizetext '%*s/%-*s' "$uw" "${R_used[r]}" "$tw" "${R_total[r]}"
+    printf '['
+    progressbar "${R_pct[r]}"
+    printf ' '
+    shade "$pcttext"
+    printf '] '
+    shade "$sizetext"        # e.g. "231MB/260MB", padded for alignment
+    printf ' '
+    shade "${R_mount[r]}"
+    printf '\n'
+done
