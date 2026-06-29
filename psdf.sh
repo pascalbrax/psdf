@@ -16,24 +16,61 @@ while (( $# )); do
         -h|--help)
             printf 'usage: %s [-i|--invert]\n' "${0##*/}"
             printf '  -i, --invert   shade from black instead of white (bright backgrounds)\n'
+            printf 'env: PSDF_INVERT=1 same as --invert\n'
+            printf '     PSDF_COLORS=truecolor|256  force colour depth (default: auto-detect)\n'
             exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
     shift
 done
 
+# Pick the colour depth: 24-bit truecolor when the terminal advertises it,
+# otherwise fall back to the xterm-256 palette. PSDF_COLORS overrides.
+case ${PSDF_COLORS:-} in
+    truecolor|24bit|24) COLORMODE=truecolor ;;
+    256)                COLORMODE=256 ;;
+    *)
+        case $COLORTERM in
+            truecolor|24bit) COLORMODE=truecolor ;;
+            *)               COLORMODE=256 ;;
+        esac ;;
+esac
+
 # purple end of the gradient (RGB)
 PR=168; PG=50; PB=235
 
-# bar glyphs and the colour used for the empty part of the bar
+# bar glyphs
 FILL='█'
 EMPTY='░'
-if (( INVERT )); then
-    EMPTYFG='\033[38;2;200;200;200m'   # light grey, visible on dark text/bright bg
-else
-    EMPTYFG='\033[38;2;90;90;90m'      # dim grey, visible on a dark bg
-fi
 RESET='\033[0m'
+
+# fgcode <r> <g> <b> -> sets FG to the SGR foreground escape for the current
+# colour mode. In 256 mode the RGB is mapped to the nearest xterm-256 index
+# (6x6x6 colour cube, or the grey ramp when r==g==b).
+fgcode()
+{
+    local r=$1 g=$2 b=$3 idx
+    if [[ $COLORMODE == truecolor ]]; then
+        FG="\033[38;2;${r};${g};${b}m"
+        return
+    fi
+    if (( r == g && g == b )); then
+        if   (( r < 8 ));   then idx=16
+        elif (( r > 238 )); then idx=231
+        else idx=$(( 232 + (r - 8) / 10 )); fi
+    else
+        idx=$(( 16 + 36 * (r * 5 / 255) + 6 * (g * 5 / 255) + (b * 5 / 255) ))
+    fi
+    FG="\033[38;5;${idx}m"
+}
+
+# colour used for the empty part of the bar (grey, visible on either bg)
+if (( INVERT )); then
+    fgcode 200 200 200   # light grey for a bright background
+else
+    fgcode 90 90 90      # dim grey for a dark background
+fi
+EMPTYFG=$FG
 
 # bar template length (constant, define once)
 barlength=50
@@ -41,10 +78,10 @@ barlength=50
 # ---------------------------------------------------------------------------
 # Colour helpers (pure bash, no subshells)
 # ---------------------------------------------------------------------------
-# cellcolor <i> <len>: sets RR GG BB for position i over a span of len cells.
-# The blend is a triangle (0 at the ends, 100 in the middle) so the gradient
-# runs white -> purple -> white ("and back"). blend 100 is full purple; blend
-# 0 is white, or black when --invert is set. Pure integer math, no subshells.
+# cellcolor <i> <len>: sets FG to the colour escape for position i over a span
+# of len cells. The blend is a triangle (0 at the ends, 100 in the middle) so
+# the gradient runs white -> purple -> white ("and back"). blend 100 is full
+# purple; blend 0 is white, or black when --invert is set. Pure integer math.
 cellcolor()
 {
     local i=$1 len=$2 d max b
@@ -53,11 +90,11 @@ cellcolor()
     (( d < 0 )) && d=$(( -d ))
     b=$(( 100 - d * 100 / max ))
     if (( INVERT )); then
-        RR=$(( PR * b / 100 )); GG=$(( PG * b / 100 )); BB=$(( PB * b / 100 ))
+        fgcode $(( PR * b / 100 )) $(( PG * b / 100 )) $(( PB * b / 100 ))
     else
-        RR=$(( 255 + (PR - 255) * b / 100 ))
-        GG=$(( 255 + (PG - 255) * b / 100 ))
-        BB=$(( 255 + (PB - 255) * b / 100 ))
+        fgcode $(( 255 + (PR - 255) * b / 100 )) \
+               $(( 255 + (PG - 255) * b / 100 )) \
+               $(( 255 + (PB - 255) * b / 100 ))
     fi
 }
 
@@ -70,7 +107,7 @@ progressbar()
     for (( i = 0; i < barlength; i++ )); do
         if (( i < n )); then
             cellcolor "$i" "$barlength"
-            out+="\033[38;2;${RR};${GG};${BB}m${FILL}"
+            out+="${FG}${FILL}"
         else
             out+="${EMPTYFG}${EMPTY}"
         fi
@@ -87,7 +124,7 @@ shade()
     (( len == 0 )) && return
     for (( i = 0; i < len; i++ )); do
         cellcolor "$i" "$len"
-        out+="\033[38;2;${RR};${GG};${BB}m${s:i:1}"
+        out+="${FG}${s:i:1}"
     done
     printf '%b' "${out}${RESET}"
 }
