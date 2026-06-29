@@ -2,34 +2,100 @@
 #
 # df as percentage bars - pascal brax 2018
 
-# define colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-# No color
-NC='\033[0m'
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+# Colours shade white -> purple -> white across each bar/label. On a bright
+# terminal background the "white" end is invisible, so --invert swaps it for
+# black (i.e. shade black -> purple -> black). Can also be set with
+# PSDF_INVERT=1 in the environment.
+INVERT=${PSDF_INVERT:-0}
+while (( $# )); do
+    case $1 in
+        -i|--invert) INVERT=1 ;;
+        -h|--help)
+            printf 'usage: %s [-i|--invert]\n' "${0##*/}"
+            printf '  -i, --invert   shade from black instead of white (bright backgrounds)\n'
+            exit 0 ;;
+        *) printf 'unknown option: %s\n' "$1" >&2; exit 1 ;;
+    esac
+    shift
+done
 
-# bar template (constant, so define it once outside the loop/function)
-bar="##################################################"
-barlength=${#bar}
+# purple end of the gradient (RGB)
+PR=168; PG=50; PB=235
 
-# progress bar function
+# bar glyphs and the colour used for the empty part of the bar
+FILL='█'
+EMPTY='░'
+if (( INVERT )); then
+    EMPTYFG='\033[38;2;200;200;200m'   # light grey, visible on dark text/bright bg
+else
+    EMPTYFG='\033[38;2;90;90;90m'      # dim grey, visible on a dark bg
+fi
+RESET='\033[0m'
+
+# bar template length (constant, define once)
+barlength=50
+
+# ---------------------------------------------------------------------------
+# Colour helpers (pure bash, no subshells)
+# ---------------------------------------------------------------------------
+# cellcolor <i> <len>: sets RR GG BB for position i over a span of len cells.
+# The blend is a triangle (0 at the ends, 100 in the middle) so the gradient
+# runs white -> purple -> white ("and back"). blend 100 is full purple; blend
+# 0 is white, or black when --invert is set. Pure integer math, no subshells.
+cellcolor()
+{
+    local i=$1 len=$2 d max b
+    max=$(( len > 1 ? len - 1 : 1 ))
+    d=$(( 2 * i - (len - 1) ))
+    (( d < 0 )) && d=$(( -d ))
+    b=$(( 100 - d * 100 / max ))
+    if (( INVERT )); then
+        RR=$(( PR * b / 100 )); GG=$(( PG * b / 100 )); BB=$(( PB * b / 100 ))
+    else
+        RR=$(( 255 + (PR - 255) * b / 100 ))
+        GG=$(( 255 + (PG - 255) * b / 100 ))
+        BB=$(( 255 + (PB - 255) * b / 100 ))
+    fi
+}
+
+# progressbar <pct>: gradient-filled bar, dim glyphs for the empty remainder
 progressbar()
 {
     local pct=$1
     local n=$(( pct * barlength / 100 ))
-    local color=$GREEN
-    if (( pct >= 90 )); then
-        color=$RED
-    elif (( pct >= 70 )); then
-        color=$YELLOW
-    fi
-    printf "\r[${color}%-${barlength}s ${NC}(%2d%%)] " "${bar:0:n}" "$pct"
+    local i b out=""
+    for (( i = 0; i < barlength; i++ )); do
+        if (( i < n )); then
+            cellcolor "$i" "$barlength"
+            out+="\033[38;2;${RR};${GG};${BB}m${FILL}"
+        else
+            out+="${EMPTYFG}${EMPTY}"
+        fi
+    done
+    printf '%b' "${out}${RESET}"
 }
 
-# Pseudo/virtual filesystem types we never want to show. These (tmpfs,
-# proc, snap squashfs images, ...) often appear many times and aren't
-# real storage. Used as a fallback filter and to drop snap loops.
+# shade <string>: print the string with the same white->purple->white sweep
+shade()
+{
+    local s=$1
+    local len=${#s}
+    local i out=""
+    (( len == 0 )) && return
+    for (( i = 0; i < len; i++ )); do
+        cellcolor "$i" "$len"
+        out+="\033[38;2;${RR};${GG};${BB}m${s:i:1}"
+    done
+    printf '%b' "${out}${RESET}"
+}
+
+# ---------------------------------------------------------------------------
+# Filesystem selection (see previous commits for the filtering rationale)
+# ---------------------------------------------------------------------------
+# Pseudo/virtual filesystem types we never want to show.
 is_pseudo() {
     case $1 in
         tmpfs|devtmpfs|devfs|fdescfs|proc|procfs|sysfs|cgroup|cgroup2|\
@@ -40,9 +106,8 @@ is_pseudo() {
     return 1
 }
 
-# When lsblk is available (Linux), build an allow-list of mount points that
-# are backed by real block devices. This is the most reliable way to skip
-# virtual/temp filesystems and dedupe what df reports.
+# When lsblk is available (Linux), build an allow-list of mount points backed
+# by real block devices.
 declare -A allow
 use_allow=0
 if command -v lsblk >/dev/null 2>&1; then
@@ -52,8 +117,7 @@ if command -v lsblk >/dev/null 2>&1; then
     (( ${#allow[@]} > 0 )) && use_allow=1
 fi
 
-# GNU df (Linux) supports -T to print the fs type, which we use for filtering
-# when lsblk isn't around. BSD/Darwin df lacks it, so fall back to -P only.
+# GNU df (Linux) supports -T to print the fs type; BSD/Darwin df doesn't.
 if df --version >/dev/null 2>&1; then
     df_out=$(df -hPT)
     has_type=1
@@ -62,8 +126,9 @@ else
     has_type=0
 fi
 
-# Parse df directly: read each line into an array and index the Use% and
-# mount columns from the end, so it works with or without the Type column.
+# ---------------------------------------------------------------------------
+# Render
+# ---------------------------------------------------------------------------
 declare -A seen
 while read -ra f; do
     n=${#f[@]}
@@ -74,27 +139,23 @@ while read -ra f; do
     type=
     (( has_type )) && type=${f[1]}
 
-    # strip the trailing '%' (e.g. 56% -> 56); skip header / non-numeric rows
     pct=${pct%\%}
     [[ $pct == *[!0-9]* || -z $pct ]] && continue
 
-    # drop virtual/pseudo filesystems (by type if known, else by source name)
     is_pseudo "${type:-$src}" && continue
     is_pseudo "$src" && continue
-
-    # with lsblk, keep only real block-device mount points
     (( use_allow )) && [[ -z ${allow[$mount]} ]] && continue
-
-    # de-duplicate: never show the same mount point twice
     [[ -n ${seen[$mount]} ]] && continue
     seen[$mount]=1
 
-    # ignore mounts with 0% Use
     if (( pct > 0 )); then
+        printf -v pcttext '(%2d%%)' "$pct"
+        printf '['
         progressbar "$pct"
-        echo "$mount"
+        printf ' '
+        shade "$pcttext"
+        printf '] '
+        shade "$mount"
+        printf '\n'
     fi
 done <<< "$df_out"
-
-# add newline to properly end
-echo -ne '\n'
