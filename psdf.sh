@@ -121,6 +121,24 @@ shade()
     printf '%b' "$out$RESET"
 }
 
+# human <df-size> -> set HUMAN to the size with a two-letter unit. df already
+# prints human-readable values (e.g. 231M, 7.9G); we just expand the single
+# letter to KB/MB/GB/TB/PB. The optional trailing 'i' that BSD/Darwin df adds
+# (231Mi) is dropped, and a bare number (bytes) gets a plain B.
+human()
+{
+    local v=${1%i}
+    case ${v: -1} in
+        K) HUMAN="${v%?}KB" ;;
+        M) HUMAN="${v%?}MB" ;;
+        G) HUMAN="${v%?}GB" ;;
+        T) HUMAN="${v%?}TB" ;;
+        P) HUMAN="${v%?}PB" ;;
+        [0-9]) HUMAN="${v}B" ;;
+        *) HUMAN="$v" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Filesystem selection (see previous commits for the filtering rationale)
 # ---------------------------------------------------------------------------
@@ -165,6 +183,8 @@ while read -ra f; do
     src=${f[0]}
     mount=${f[n-1]}
     pct=${f[n-2]}
+    used=${f[n-4]}        # columns from the end: mount, Use%, Avail, Used, Size
+    size=${f[n-5]}        # (works with or without the leading Type column)
     type=
     (( has_type )) && type=${f[1]}
 
@@ -179,11 +199,15 @@ while read -ra f; do
 
     if (( pct > 0 )); then
         printf -v pcttext '(%2d%%)' "$pct"
+        human "$used"; u=$HUMAN
+        human "$size"; t=$HUMAN
         printf '['
         progressbar "$pct"
         printf ' '
         shade "$pcttext"
         printf '] '
+        shade "$u/$t"        # used / total, e.g. 231MB/260MB
+        printf ' '
         shade "$mount"
         printf '\n'
     fi
