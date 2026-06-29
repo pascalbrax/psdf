@@ -36,17 +36,20 @@ case ${PSDF_COLORS:-} in
         esac ;;
 esac
 
-# purple end of the gradient (RGB)
-PR=168; PG=50; PB=235
-
-# bar glyphs
-FILL='█'
-EMPTY='░'
+# ---------------------------------------------------------------------------
+# Colours (pure bash, no subshells)
+# ---------------------------------------------------------------------------
+# The gradient runs white -> purple -> white; there are no green/yellow/red
+# usage thresholds, the colour carries no meaning beyond decoration.
+PR=168; PG=50; PB=235   # purple end of the gradient (RGB)
+FILL='█'                # glyph for the used part of a bar
+EMPTY='░'               # glyph for the free part of a bar
 RESET='\033[0m'
+barlength=50            # width of a full bar, in cells
 
-# fgcode <r> <g> <b> -> sets FG to the SGR foreground escape for the current
-# colour mode. In 256 mode the RGB is mapped to the nearest xterm-256 index
-# (6x6x6 colour cube, or the grey ramp when r==g==b).
+# fgcode <r> <g> <b> -> set FG to the foreground escape for the active colour
+# depth. In 256 mode the RGB is mapped to the nearest xterm-256 index (6x6x6
+# colour cube, or the grey ramp when r==g==b).
 fgcode()
 {
     local r=$1 g=$2 b=$3 idx
@@ -64,24 +67,9 @@ fgcode()
     FG="\033[38;5;${idx}m"
 }
 
-# colour used for the empty part of the bar (grey, visible on either bg)
-if (( INVERT )); then
-    fgcode 200 200 200   # light grey for a bright background
-else
-    fgcode 90 90 90      # dim grey for a dark background
-fi
-EMPTYFG=$FG
-
-# bar template length (constant, define once)
-barlength=50
-
-# ---------------------------------------------------------------------------
-# Colour helpers (pure bash, no subshells)
-# ---------------------------------------------------------------------------
-# cellcolor <i> <len>: sets FG to the colour escape for position i over a span
-# of len cells. The blend is a triangle (0 at the ends, 100 in the middle) so
-# the gradient runs white -> purple -> white ("and back"). blend 100 is full
-# purple; blend 0 is white, or black when --invert is set. Pure integer math.
+# cellcolor <i> <len> -> set FG to the gradient colour for cell i of len. The
+# blend is a triangle (0 at the ends, 100 in the middle) so the sweep runs
+# white -> purple -> white ("and back"). blend 0 is white, or black with -i.
 cellcolor()
 {
     local i=$1 len=$2 d max b
@@ -98,35 +86,39 @@ cellcolor()
     fi
 }
 
-# progressbar <pct>: gradient-filled bar, dim glyphs for the empty remainder
+# A bar cell's colour depends only on its position, not on the usage %, so
+# every bar shares the same gradient -> render each cell's escape just once.
+declare -a CELL
+for (( i = 0; i < barlength; i++ )); do
+    cellcolor "$i" "$barlength"
+    CELL[i]="${FG}${FILL}"
+done
+# the free part is one fixed grey: light for a bright bg, dim for a dark one
+if (( INVERT )); then fgcode 200 200 200; else fgcode 90 90 90; fi
+EMPTYCELL="${FG}${EMPTY}"
+
+# progressbar <pct> -> n cells of the pre-rendered gradient, rest left empty
 progressbar()
 {
-    local pct=$1
-    local n=$(( pct * barlength / 100 ))
-    local i b out=""
+    local n=$(( $1 * barlength / 100 )) i out=
     for (( i = 0; i < barlength; i++ )); do
-        if (( i < n )); then
-            cellcolor "$i" "$barlength"
-            out+="${FG}${FILL}"
-        else
-            out+="${EMPTYFG}${EMPTY}"
-        fi
+        (( i < n )) && out+=${CELL[i]} || out+=$EMPTYCELL
     done
-    printf '%b' "${out}${RESET}"
+    printf '%b' "$out$RESET"
 }
 
-# shade <string>: print the string with the same white->purple->white sweep
+# shade <string> -> print the string with the same gradient sweep (used for
+# the (NN%) label and the mount point; lengths vary so it can't be cached)
 shade()
 {
-    local s=$1
-    local len=${#s}
-    local i out=""
-    (( len == 0 )) && return
+    local s=$1 i out=
+    local len=${#s}        # note: separate line; ${#s} on the same line as
+                           # 'local s=$1' would read the old (empty) s -> 0
     for (( i = 0; i < len; i++ )); do
         cellcolor "$i" "$len"
         out+="${FG}${s:i:1}"
     done
-    printf '%b' "${out}${RESET}"
+    printf '%b' "$out$RESET"
 }
 
 # ---------------------------------------------------------------------------
